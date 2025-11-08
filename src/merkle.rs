@@ -148,3 +148,31 @@ fn next_pow2(n: usize) -> usize {
     }
     x + 1
 }
+
+#[cfg(test)]
+mod test {
+    use crate::merkle::{Blake3Hasher, MerkleTree};
+    use rand::rngs::StdRng;
+    use rand::{Rng, SeedableRng};
+
+    fn rand_rows(n: usize, max_len: usize, seed: u64) -> Vec<Vec<u8>> {
+        let mut rng = StdRng::seed_from_u64(seed);
+        (0..n)
+            .map(|_| {
+                let len = rng.random_range(1..=max_len);
+                (0..len).map(|_| rng.random::<u8>()).collect::<Vec<u8>>()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn determinism_same_rows_same_root() {
+        let rows = rand_rows(7, 64, 42);
+        let refs: Vec<&[u8]> = rows.iter().map(|v| v.as_slice()).collect();
+        let t1 = MerkleTree::<Blake3Hasher>::from_rows(&refs).unwrap();
+        let t2 = MerkleTree::<Blake3Hasher>::from_rows(&refs).unwrap();
+        assert_eq!(t1.root(), t2.root());
+        assert_eq!(t1.leaf_count, 7);
+        assert_eq!(t1.leaf_cap, 8);
+    }
+}
