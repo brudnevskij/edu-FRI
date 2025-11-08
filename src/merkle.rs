@@ -21,6 +21,7 @@ pub trait Hasher {
     fn hash_node(left_node: &Digest, right_node: &Digest) -> Digest;
 }
 
+#[derive(Debug)]
 pub struct Blake3Hasher;
 impl Hasher for Blake3Hasher {
     fn hash_leaf(data: &[u8]) -> Digest {
@@ -39,6 +40,7 @@ impl Hasher for Blake3Hasher {
     }
 }
 
+#[derive(Error, Debug)]
 pub struct MerkleTree<H: Hasher = Blake3Hasher> {
     nodes: Vec<Digest>,
     leaf_count: usize,
@@ -130,7 +132,7 @@ pub fn verify_leaf<H: Hasher>(root: &Digest, leaf: &Digest, auth_path: &AuthPath
     root == &acc
 }
 
-fn verify_row<H: Hasher>(root: &Digest, row: &[u8], auth_path: &AuthPath) -> bool {
+pub fn verify_row<H: Hasher>(root: &Digest, row: &[u8], auth_path: &AuthPath) -> bool {
     let leaf = H::hash_leaf(row);
     verify_leaf::<H>(root, &leaf, auth_path)
 }
@@ -151,7 +153,7 @@ fn next_pow2(n: usize) -> usize {
 
 #[cfg(test)]
 mod test {
-    use crate::merkle::{Blake3Hasher, MerkleTree, verify_row};
+    use crate::merkle::{Blake3Hasher, MerkleTree, verify_row, MerkleError};
     use rand::rngs::StdRng;
     use rand::{Rng, SeedableRng};
 
@@ -185,5 +187,55 @@ mod test {
             let auth = tree.open(i).unwrap();
             assert!(verify_row::<Blake3Hasher>(tree.root(), row, &auth));
         }
+    }
+
+    #[test]
+    fn tamper_leaf_fails() {
+        let mut rows = rand_rows(5, 40, 9);
+        let refs: Vec<&[u8]> = rows.iter().map(|v| v.as_slice()).collect();
+        let t = MerkleTree::<Blake3Hasher>::from_rows(&refs).unwrap();
+        let i = 3usize;
+        let path = t.open(i).unwrap();
+
+        // Flip a bit in the row
+        rows[i][0] ^= 0b0000_0001;
+        assert!(!verify_row::<Blake3Hasher>(t.root(), &rows[i], &path));
+    }
+
+    #[test]
+    fn tamper_path_fails() {
+        let rows = rand_rows(6, 32, 11);
+        let refs: Vec<&[u8]> = rows.iter().map(|v| v.as_slice()).collect();
+        let t = MerkleTree::<Blake3Hasher>::from_rows(&refs).unwrap();
+        let i = 4usize;
+        let mut path = t.open(i).unwrap();
+        // corrupt one auth node
+        path.nodes[0][0] ^= 0xFF;
+        assert!(!verify_row::<Blake3Hasher>(t.root(), &rows[i], &path));
+    }
+
+    #[test]
+    fn single_leaf_has_empty_path() {
+        let rows = rand_rows(1, 16, 1);
+        let refs: Vec<&[u8]> = rows.iter().map(|v| v.as_slice()).collect();
+        let t = MerkleTree::<Blake3Hasher>::from_rows(&refs).unwrap();
+        let path = t.open(0).unwrap();
+        assert!(path.nodes.is_empty());
+        assert!(verify_row::<Blake3Hasher>(t.root(), &rows[0], &path));
+    }
+
+    #[test]
+    fn index_out_of_range() {
+        let rows = rand_rows(3, 16, 3);
+        let refs: Vec<&[u8]> = rows.iter().map(|v| v.as_slice()).collect();
+        let t = MerkleTree::<Blake3Hasher>::from_rows(&refs).unwrap();
+        assert!(matches!(t.open(3), Err(MerkleError::IndexOutOfRange)));
+    }
+
+    #[test]
+    fn empty_rejected() {
+        let empty: [&[u8]; 0] = [];
+        let err = MerkleTree::<Blake3Hasher>::from_rows(&empty).unwrap_err();
+        assert!(matches!(err, MerkleError::Empty));
     }
 }
