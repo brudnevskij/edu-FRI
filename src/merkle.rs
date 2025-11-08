@@ -51,7 +51,7 @@ impl<H: Hasher> MerkleTree<H> {
         if rows.is_empty() {
             return Err(MerkleError::Empty);
         }
-        let leaves: Vec<Digest>= rows.iter().map(|x| H::hash_leaf(x)).collect();
+        let leaves: Vec<Digest> = rows.iter().map(|x| H::hash_leaf(x)).collect();
         Ok(Self::from_leaf_digests(&leaves)?)
     }
 
@@ -88,9 +88,51 @@ impl<H: Hasher> MerkleTree<H> {
         })
     }
 
+    // [0, 1..powe^2-1]
+    pub fn open(&self, index: usize) -> Result<AuthPath, MerkleError> {
+        if index >= self.leaf_count {
+            return Err(MerkleError::IndexOutOfRange);
+        }
+
+        let mut pos = self.leaf_cap + index;
+        let mut nodes = Vec::with_capacity(self.height());
+        while pos > 1 {
+            let sib = if pos & 1 == 0 { pos + 1 } else { pos - 1 };
+            nodes.push(self.nodes[sib]);
+            pos >>= 1;
+        }
+        Ok(AuthPath { nodes, index })
+    }
+
     pub fn root(&self) -> &Digest {
         &self.nodes[1]
     }
+
+    /// Tree height in levels from leaves to root (log2(cap)).
+    fn height(&self) -> usize {
+        // For cap == 1, height == 0 (single leaf, path is empty).
+        usize::BITS as usize - (self.leaf_cap.leading_zeros() as usize) - 1
+    }
+}
+
+pub fn verify_leaf<H: Hasher>(root: &Digest, leaf: &Digest, auth_path: &AuthPath) -> bool {
+    let mut acc = *leaf;
+    let mut idx = auth_path.index;
+
+    for sib in auth_path.nodes.iter() {
+        if idx & 1 == 0 {
+            acc = H::hash_node(&acc, sib);
+        } else {
+            acc = H::hash_node(sib, &acc);
+        }
+        idx >>= 1;
+    }
+    root == &acc
+}
+
+fn verify_row<H: Hasher>(root: &Digest, row: &[u8], auth_path: &AuthPath) -> bool {
+    let leaf = H::hash_leaf(row);
+    verify_leaf::<H>(root, &leaf, auth_path)
 }
 
 fn next_pow2(n: usize) -> usize {
