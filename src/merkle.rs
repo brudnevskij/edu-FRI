@@ -151,7 +151,7 @@ fn next_pow2(n: usize) -> usize {
 
 #[cfg(test)]
 mod test {
-    use crate::merkle::{Blake3Hasher, MerkleTree};
+    use crate::merkle::{Blake3Hasher, MerkleTree, verify_row};
     use rand::rngs::StdRng;
     use rand::{Rng, SeedableRng};
 
@@ -174,5 +174,16 @@ mod test {
         assert_eq!(t1.root(), t2.root());
         assert_eq!(t1.leaf_count, 7);
         assert_eq!(t1.leaf_cap, 8);
+    }
+
+    #[test]
+    fn verify_all_leaves() {
+        let rows = rand_rows(7, 64, 42);
+        let refs: Vec<&[u8]> = rows.iter().map(|v| v.as_slice()).collect();
+        let tree = MerkleTree::<Blake3Hasher>::from_rows(&refs).unwrap();
+        for (i, row) in rows.iter().enumerate() {
+            let auth = tree.open(i).unwrap();
+            assert!(verify_row::<Blake3Hasher>(tree.root(), row, &auth));
+        }
     }
 }
