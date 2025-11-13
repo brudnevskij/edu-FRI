@@ -1,4 +1,4 @@
-use crate::merkle::{AuthPath, Digest, MerkleError, MerkleTree};
+use crate::merkle::{AuthPath, Blake3Hasher, Digest, MerkleError, MerkleTree};
 use ark_ff::{FftField, Field, PrimeField};
 use ark_poly::{EvaluationDomain, GeneralEvaluationDomain};
 use thiserror::Error;
@@ -63,7 +63,18 @@ pub fn prove<F: PrimeField + FftField>(
     evals[..coeffs.len()].copy_from_slice(&coeffs);
     domain.fft_in_place(&mut evals);
 
-    let evals_tree = MerkleTree::from_rows(&evals)?;
+    // convert Vec<F> to slice of bytes
+    let mut leaves_bytes: Vec<Vec<u8>> = Vec::with_capacity(evals.len());
+    for x in &evals {
+        let mut buf = Vec::new();
+        x.serialize_compressed(&mut buf).expect("field serialize");
+        leaves_bytes.push(buf);
+    }
+    let row_refs: Vec<&[u8]> = leaves_bytes.iter().map(|v| v.as_slice()).collect();
+
+    let tree = MerkleTree::<Blake3Hasher>::from_rows(&row_refs)?;
+    let root = tree.root();
+
     todo!()
 }
 
