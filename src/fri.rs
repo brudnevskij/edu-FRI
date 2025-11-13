@@ -1,6 +1,7 @@
-use crate::merkle::{AuthPath, Digest};
+use crate::merkle::{AuthPath, Digest, MerkleTree};
 use ark_ff::{FftField, Field, PrimeField};
-use ark_poly::GeneralEvaluationDomain;
+use ark_poly::{EvaluationDomain, GeneralEvaluationDomain};
+use thiserror::Error;
 
 pub struct FriProof<F: Field> {
     // Merkle roots per FRI step
@@ -29,12 +30,36 @@ pub struct Opened<F: Field> {
     pub path: AuthPath,
 }
 
+#[derive(Error, Debug)]
+pub enum ProofError {
+    #[error("polynomial degree is bigger then domain")]
+    DegreeExceedsDomain,
+    #[error("minimal polynomial size is invalid")]
+    InvalidTerminalSize,
+}
+
 pub fn prove<F: PrimeField + FftField>(
     coeffs: &[F],
     domain: GeneralEvaluationDomain<F>,
     min_poly_size: usize,
     fs_seed: &[u8],
-) -> FriProof<F> {
+) -> Result<FriProof<F>, ProofError> {
+    let domain_size = domain.size();
+    let degree = coeffs.len() - 1;
+
+    // degree must fit the domain
+    if coeffs.is_empty() || degree > domain_size - 1 {
+        return Err(ProofError::DegreeExceedsDomain);
+    }
+
+    if min_poly_size == 0 || min_poly_size > domain_size || !min_poly_size.is_power_of_two() {
+        return Err(ProofError::InvalidTerminalSize);
+    }
+
+    let mut evals = vec![F::zero(); degree];
+    evals[..coeffs.len()].copy_from_slice(&coeffs);
+    domain.fft_in_place(&mut evals);
+
     todo!()
 }
 
