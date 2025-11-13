@@ -90,3 +90,53 @@ impl Transcript {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::Transcript;
+    use ark_bn254::Fr;
+
+    #[test]
+    fn determinism() {
+        let mut t1 = Transcript::new(b"fri/v1", b"seed123");
+        let mut t2 = Transcript::new(b"fri/v1", b"seed123");
+
+        t1.absorb_params(1024, 32, 40);
+        t2.absorb_params(1024, 32, 40);
+
+        let beta1: Fr = t1.challenge_field("beta/0");
+        let beta2: Fr = t2.challenge_field("beta/0");
+        assert_eq!(beta1, beta2);
+
+        let i1 = t1.challenge_index("q/0", 1024);
+        let i2 = t2.challenge_index("q/0", 1024);
+        assert_eq!(i1, i2);
+
+        t1.absorb_bytes("root0", &[1, 2, 3]);
+        t2.absorb_bytes("root0", &[9, 9, 9]);
+        let b1: Fr = t1.challenge_field("beta/1");
+        let b2: Fr = t2.challenge_field("beta/1");
+        assert_ne!(b1, b2);
+    }
+
+    #[test]
+    fn index_is_unbiased_small_n() {
+        let mut tx = Transcript::new(b"fri/v1", b"x");
+        for _ in 0..100 {
+            let idx = tx.challenge_index("idx", 7);
+            assert!(idx < 7);
+        }
+    }
+
+    #[test]
+    fn absorb_field_roundtrip() {
+        let mut tx = Transcript::new(b"fri/v1", b"x");
+        let x = Fr::from(123456u64);
+        tx.absorb_field("test/field", &x);
+        let b1: Fr = tx.challenge_field("beta");
+        let mut tx2 = Transcript::new(b"fri/v1", b"x");
+        tx2.absorb_field("test/field", &x);
+        let b2: Fr = tx2.challenge_field("beta");
+        assert_eq!(b1, b2);
+    }
+}
