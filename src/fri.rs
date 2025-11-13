@@ -1,4 +1,4 @@
-use crate::merkle::{AuthPath, Digest, MerkleTree};
+use crate::merkle::{AuthPath, Digest, MerkleError, MerkleTree};
 use ark_ff::{FftField, Field, PrimeField};
 use ark_poly::{EvaluationDomain, GeneralEvaluationDomain};
 use thiserror::Error;
@@ -36,6 +36,9 @@ pub enum ProofError {
     DegreeExceedsDomain,
     #[error("minimal polynomial size is invalid")]
     InvalidTerminalSize,
+
+    #[error(transparent)]
+    Merkle(#[from] MerkleError),
 }
 
 pub fn prove<F: PrimeField + FftField>(
@@ -60,6 +63,7 @@ pub fn prove<F: PrimeField + FftField>(
     evals[..coeffs.len()].copy_from_slice(&coeffs);
     domain.fft_in_place(&mut evals);
 
+    let evals_tree = MerkleTree::from_rows(&evals)?;
     todo!()
 }
 
