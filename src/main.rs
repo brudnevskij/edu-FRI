@@ -1,3 +1,4 @@
+mod fri;
 mod merkle;
 
 fn main() {

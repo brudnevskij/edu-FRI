@@ -153,7 +153,7 @@ fn next_pow2(n: usize) -> usize {
 
 #[cfg(test)]
 mod test {
-    use crate::merkle::{Blake3Hasher, MerkleTree, verify_row, MerkleError};
+    use crate::merkle::{Blake3Hasher, MerkleError, MerkleTree, verify_row};
     use rand::rngs::StdRng;
     use rand::{Rng, SeedableRng};
 
