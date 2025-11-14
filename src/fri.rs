@@ -132,3 +132,153 @@ pub fn verify<F: PrimeField + FftField>(
 ) -> bool {
     todo!()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::fold_poly;
+    use ark_bn254::Fr;
+    use ark_ff::{Field, UniformRand, Zero};
+    use ark_poly::univariate::DensePolynomial;
+    use ark_poly::{DenseUVPolynomial, EvaluationDomain, GeneralEvaluationDomain};
+    use ark_std::rand::{SeedableRng, rngs::StdRng};
+
+    // build f(x) from random coeffs of given length
+    fn random_poly(deg_plus_1: usize, seed: u64) -> DensePolynomial<Fr> {
+        let mut rng = ark_std::test_rng();
+        let coeffs: Vec<Fr> = (0..deg_plus_1).map(|_| Fr::rand(&mut rng)).collect();
+        DensePolynomial::from_coefficients_slice(&coeffs)
+    }
+
+    // split f(X) = g(X^2) + X h(X^2) ⇒ return (g(Y), h(Y)) as polynomials in Y
+    fn even_odd_split(f: &DensePolynomial<Fr>) -> (DensePolynomial<Fr>, DensePolynomial<Fr>) {
+        let coeffs = &f.coeffs;
+        let mut g = Vec::new(); // even coeffs a_0, a_2, a_4 -> g_0, g_1, g_2
+        let mut h = Vec::new(); // odd  coeffs a_1, a_3, a_5 -> h_0, h_1, h_2
+        for (k, a) in coeffs.iter().cloned().enumerate() {
+            if k % 2 == 0 {
+                g.push(a);
+            } else {
+                h.push(a);
+            }
+        }
+        (
+            DensePolynomial::from_coefficients_vec(g),
+            DensePolynomial::from_coefficients_vec(h),
+        )
+    }
+
+    // evaluate polynomial p at point x using Horner
+    fn eval_poly(p: &DensePolynomial<Fr>, x: Fr) -> Fr {
+        p.coeffs
+            .iter()
+            .rev()
+            .fold(Fr::zero(), |acc, &c| acc * x + c)
+    }
+
+    #[test]
+    fn fold_matches_even_odd_combo_small() {
+        let n = 16usize;
+        let domain = GeneralEvaluationDomain::<Fr>::new(n).unwrap();
+
+        let f = random_poly(10, 1337);
+        // compute evals on D0 directly (not FFT), to be agnostic
+        let g = domain.group_gen();
+        let mut x = domain.element(0);
+        let mut evals = Vec::with_capacity(n);
+        for i in 0..n {
+            if i > 0 {
+                x *= g;
+            }
+            evals.push(eval_poly(&f, x));
+        }
+
+        // random beta
+        let mut rng = StdRng::seed_from_u64(42);
+        let beta = Fr::rand(&mut rng);
+
+        let folded = fold_poly(&evals, domain, beta);
+
+        // expected: u(Y) = g(Y) + beta * h(Y), evaluated at Y = x_j^2
+        let (g_poly, h_poly) = even_odd_split(&f);
+        let u_poly = DensePolynomial::from_coefficients_vec({
+            // u = g + beta*h
+            let (mut u, m) = (g_poly.clone(), h_poly.clone());
+            let mut coeffs = u.coeffs;
+            if coeffs.len() < m.coeffs.len() {
+                coeffs.resize(m.coeffs.len(), Fr::zero());
+            }
+            for (k, c) in m.coeffs.iter().enumerate() {
+                coeffs[k] += *c * beta;
+            }
+            coeffs
+        });
+
+        let half = n / 2;
+        let mut xj = domain.element(0);
+        let mut expected = Vec::with_capacity(half);
+        for j in 0..half {
+            if j > 0 {
+                xj *= g;
+            }
+            let y = xj.square();
+            expected.push(eval_poly(&u_poly, y));
+        }
+
+        assert_eq!(folded.len(), half);
+        assert_eq!(expected.len(), half);
+        for (a, b) in folded.iter().zip(expected.iter()) {
+            assert_eq!(a, b, "mismatch at some index");
+        }
+    }
+
+    #[test]
+    fn fold_beta_zero_is_even_average() {
+        let n = 8usize;
+        let domain = GeneralEvaluationDomain::<Fr>::new(n).unwrap();
+
+        // build any polynomial and eval on grid
+        let f = random_poly(6, 7);
+        let g = domain.group_gen();
+        let mut x = domain.element(0);
+        let mut evals = Vec::with_capacity(n);
+        for i in 0..n {
+            if i > 0 {
+                x *= g;
+            }
+            evals.push(eval_poly(&f, x));
+        }
+
+        // beta = 0 ⇒ f* = (f(x)+f(-x))/2
+        let beta = Fr::zero();
+        let folded = fold_poly(&evals, domain, beta);
+
+        let inv2 = Fr::from(2u64).inverse().unwrap();
+        let mut expected = Vec::with_capacity(n / 2);
+        for i in 0..(n / 2) {
+            expected.push((evals[i] + evals[i + n / 2]) * inv2);
+        }
+
+        assert_eq!(folded, expected);
+    }
+
+    #[test]
+    fn pairing_invariant_minus_x_is_shift_by_half() {
+        let n = 32usize;
+        let domain = GeneralEvaluationDomain::<Fr>::new(n).unwrap();
+        let g = domain.group_gen();
+        let mut x = domain.element(0);
+
+        // check that x_{i + n/2} = -x_i
+        let half = n / 2;
+        let mut xs: Vec<Fr> = Vec::with_capacity(n);
+        for i in 0..n {
+            if i > 0 {
+                x *= g;
+            }
+            xs.push(x);
+        }
+        for i in 0..half {
+            assert_eq!(xs[i + half], -xs[i]);
+        }
+    }
+}

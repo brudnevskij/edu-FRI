@@ -223,6 +223,7 @@ dependencies = [
  "ark-bn254",
  "ark-ff",
  "ark-poly",
+ "ark-std",
  "blake3",
  "rand 0.9.2",
  "thiserror",
