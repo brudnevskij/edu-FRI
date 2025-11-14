@@ -42,6 +42,13 @@ pub enum ProofError {
     Merkle(#[from] MerkleError),
 }
 
+
+#[derive(Debug)]
+struct RoundDomain<F> {
+    generator: F,
+    size: usize,
+}
+
 pub fn prove<F: PrimeField + FftField>(
     coeffs: &[F],
     domain: GeneralEvaluationDomain<F>,
@@ -76,7 +83,7 @@ pub fn prove<F: PrimeField + FftField>(
     let alpha = tx.challenge_field("alpha");
 
     /// calculating f*(x) codeword and committing to it
-    let f_star_evals = fold_poly(&evals, domain, alpha);
+    let f_star_evals = fold_once(&evals, domain.group_gen(), alpha);
     let f_star_leafs = evals_to_bytes(&f_star_evals);
     let f_star_leafs = f_star_leafs.iter().map(|v| v.as_slice()).collect::<Vec<_>>();
 
@@ -102,41 +109,27 @@ fn evals_to_bytes<F: PrimeField + FftField>(evals: &[F]) -> Vec<Vec<u8>> {
     leaves_bytes
 }
 
-fn fold_poly<F: PrimeField + FftField>(
-    evals: &[F],
-    domain: GeneralEvaluationDomain<F>,
-    challenge: F,
-) -> Vec<F> {
+fn fold_once<F: PrimeField + FftField>(evals: &[F], g: F, beta: F)-> Vec<F>{
     let n = evals.len();
-    assert!(n.is_power_of_two() && n >= 2);
     let half = n / 2;
 
     let inv2 = F::from(2u64).inverse().expect("inverse");
-    let g = domain.group_gen();
-    let mut x = domain.element(0);
+    let ginv = g.inverse().expect("inverse");
 
+    let mut invx = F::one();
     let mut out = Vec::with_capacity(half);
     for i in 0..half {
         let j = i + half;
-
-        // f(x), f(-x)
         let fx = evals[i];
         let fnegx = evals[j];
 
-        if i > 0 {
-            x *= g;
-        }
-
-        // even/odd parts
         let f_even = (fx + fnegx) * inv2;
-        // can be accumulated also
-        let inv2x = inv2 * x.inverse().unwrap();
-        let f_odd = (fx - fnegx) * inv2x;
+        let f_odd = (fx - fnegx) * inv2 * invx;
 
-        let f_star = f_even + challenge * f_odd;
-        out.push(f_star);
+        out.push(f_even + beta * f_odd);
+
+        invx = invx * ginv
     }
-
     out
 }
 
@@ -151,7 +144,7 @@ pub fn verify<F: PrimeField + FftField>(
 
 #[cfg(test)]
 mod tests {
-    use super::fold_poly;
+    use super::{fold_once};
     use ark_bn254::Fr;
     use ark_ff::{Field, UniformRand, Zero};
     use ark_poly::univariate::DensePolynomial;
@@ -212,7 +205,7 @@ mod tests {
         let mut rng = StdRng::seed_from_u64(42);
         let beta = Fr::rand(&mut rng);
 
-        let folded = fold_poly(&evals, domain, beta);
+        let folded = fold_once(&evals, g, beta);
 
         // expected: u(Y) = g(Y) + beta * h(Y), evaluated at Y = x_j^2
         let (g_poly, h_poly) = even_odd_split(&f);
@@ -266,7 +259,7 @@ mod tests {
 
         // beta = 0 ⇒ f* = (f(x)+f(-x))/2
         let beta = Fr::zero();
-        let folded = fold_poly(&evals, domain, beta);
+        let folded = fold_once(&evals, g, beta);
 
         let inv2 = Fr::from(2u64).inverse().unwrap();
         let mut expected = Vec::with_capacity(n / 2);
