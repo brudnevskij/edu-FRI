@@ -51,48 +51,53 @@ struct RoundDomain<F> {
 
 pub fn prove<F: PrimeField + FftField>(
     coeffs: &[F],
-    domain: GeneralEvaluationDomain<F>,
+    domain0: GeneralEvaluationDomain<F>,
     min_poly_size: usize,
     fs_seed: &[u8],
 ) -> Result<FriProof<F>, ProofError> {
-    let domain_size = domain.size();
-    let degree = coeffs.len() - 1;
-
-    // degree must fit the domain
-    if coeffs.is_empty() || degree > domain_size - 1 {
+    let n0 = domain0.size();
+    if coeffs.is_empty() || coeffs.len() > n0 {
         return Err(ProofError::DegreeExceedsDomain);
     }
-
-    if min_poly_size == 0 || min_poly_size > domain_size || !min_poly_size.is_power_of_two() {
+    if min_poly_size == 0 || min_poly_size > n0 || !min_poly_size.is_power_of_two() {
         return Err(ProofError::InvalidTerminalSize);
     }
 
-    /// committing to f(x)
-    let mut evals = vec![F::zero(); domain_size];
-    evals[..coeffs.len()].copy_from_slice(&coeffs);
-    domain.fft_in_place(&mut evals);
-    let leaf_vecs = evals_to_bytes(&evals);
-    let leaf_slices: Vec<&[u8]> = leaf_vecs.iter().map(|v| v.as_slice()).collect();
+    let mut evals_i = vec![F::zero(); n0];
+    evals_i[..coeffs.len()].copy_from_slice(coeffs);
+    domain0.fft_in_place(&mut evals_i);
+    let g0 = domain0.group_gen();
 
-    let tree = MerkleTree::<Blake3Hasher>::from_rows(&leaf_slices)?;
-    let root = tree.root();
+    // TODO: make it scalable
+    let num_queries = 1;
+    let mut tx = Transcript::new(b"transcript", fs_seed);
+    tx.absorb_params(n0, min_poly_size,num_queries);
+    tx.absorb_field("omega0", g0);
 
-    // getting random challenge
-    let mut tx = Transcript::new(b"fri", fs_seed);
-    tx.absorb_digest(root);
-    let alpha = tx.challenge_field("alpha");
+    let mut roots = vec![];
+    let mut trees = vec![];
+    let mut domains: Vec<RoundDomain<F>> = vec![];
+    let mut n = n0;
+    let mut g = g0;
 
-    /// calculating f*(x) codeword and committing to it
-    let f_star_evals = fold_once(&evals, domain.group_gen(), alpha);
-    let f_star_leafs = evals_to_bytes(&f_star_evals);
-    let f_star_leafs = f_star_leafs.iter().map(|v| v.as_slice()).collect::<Vec<_>>();
+    while n > min_poly_size {
+        let leaves_bytes = evals_to_bytes(&evals_i);
+        let leaf_refs = leaves_bytes.iter().map(|v | v.as_slice()).collect();
+        let tree = MerkleTree::<Blake3Hasher>::from_rows(&leaf_refs)?;
+        let root = tree.root();
+        tx.absorb_digest(root);
+        roots.push(root);
+        trees.push(tree);
+        domains.push(RoundDomain { generator: g, size: n});
 
-    let f_star_tree = MerkleTree::<Blake3Hasher>::from_rows(&f_star_leafs)?;
-    let f_star_root = f_star_tree.root();
-
-    tx.absorb_digest(f_star_root);
-    // sampling i in [0..n/2)
-    let i = tx.challenge_index("i_query", f_star_evals.len() as u64);
+        // get challenge
+        let beta_i: F = tx.challenge_field("fri/beta_i");
+        // fold
+        let evals_i = fold_once(&evals_i, g, beta_i);
+        // advance
+        g = g.square();
+        n /= 2;
+    }
 
 
     todo!()
