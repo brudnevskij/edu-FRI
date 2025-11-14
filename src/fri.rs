@@ -42,7 +42,6 @@ pub enum ProofError {
     Merkle(#[from] MerkleError),
 }
 
-
 #[derive(Debug)]
 struct RoundDomain<F> {
     generator: F,
@@ -71,36 +70,79 @@ pub fn prove<F: PrimeField + FftField>(
     // TODO: make it scalable
     let num_queries = 1;
     let mut tx = Transcript::new(b"transcript", fs_seed);
-    tx.absorb_params(n0, min_poly_size,num_queries);
-    tx.absorb_field("omega0", g0);
+    tx.absorb_params(n0, min_poly_size, num_queries);
 
+    let mut evaluations_layers = vec![];
     let mut roots = vec![];
     let mut trees = vec![];
     let mut domains: Vec<RoundDomain<F>> = vec![];
     let mut n = n0;
     let mut g = g0;
 
+    // calculate fold
     while n > min_poly_size {
         let leaves_bytes = evals_to_bytes(&evals_i);
-        let leaf_refs = leaves_bytes.iter().map(|v | v.as_slice()).collect();
+        let leaf_refs: Vec<_> = leaves_bytes.iter().map(|v| v.as_slice()).collect();
         let tree = MerkleTree::<Blake3Hasher>::from_rows(&leaf_refs)?;
         let root = tree.root();
         tx.absorb_digest(root);
-        roots.push(root);
+        roots.push(*root);
         trees.push(tree);
-        domains.push(RoundDomain { generator: g, size: n});
+        domains.push(RoundDomain {
+            generator: g,
+            size: n,
+        });
+        evaluations_layers.push(evals_i.clone());
 
         // get challenge
         let beta_i: F = tx.challenge_field("fri/beta_i");
         // fold
-        let evals_i = fold_once(&evals_i, g, beta_i);
+        evals_i = fold_once(&evals_i, g, beta_i);
         // advance
         g = g.square();
         n /= 2;
     }
 
+    // query phase
+    let mut queries = Vec::with_capacity(num_queries);
+    for q in 0..num_queries {
+        let mut j = tx.challenge_index("fri/query", n0 as u64) as usize;
+        let mut rounds = Vec::with_capacity(roots.len());
 
-    todo!()
+        for (i, tree) in trees.iter().enumerate() {
+            let RoundDomain {
+                generator: _g,
+                size: ni,
+            } = domains[i];
+            let half = ni / 2;
+
+            let left = evaluations_layers[i][j];
+            let right = evaluations_layers[i][j + half];
+
+            let left_path = tree.open(j)?;
+            let right_path = tree.open(j + half)?;
+
+            rounds.push(FriRound {
+                left: Opened {
+                    value: left,
+                    path: left_path,
+                },
+                right: Opened {
+                    value: right,
+                    path: right_path,
+                },
+            });
+
+            j %= half;
+        }
+        queries.push(FriQuery { rounds })
+    }
+
+    Ok(FriProof {
+        roots,
+        queries,
+        final_coeffs: todo!(),
+    })
 }
 
 // convert Vec<F> to slice of bytes
@@ -114,7 +156,7 @@ fn evals_to_bytes<F: PrimeField + FftField>(evals: &[F]) -> Vec<Vec<u8>> {
     leaves_bytes
 }
 
-fn fold_once<F: PrimeField + FftField>(evals: &[F], g: F, beta: F)-> Vec<F>{
+fn fold_once<F: PrimeField + FftField>(evals: &[F], g: F, beta: F) -> Vec<F> {
     let n = evals.len();
     let half = n / 2;
 
@@ -149,7 +191,7 @@ pub fn verify<F: PrimeField + FftField>(
 
 #[cfg(test)]
 mod tests {
-    use super::{fold_once};
+    use super::fold_once;
     use ark_bn254::Fr;
     use ark_ff::{Field, UniformRand, Zero};
     use ark_poly::univariate::DensePolynomial;
