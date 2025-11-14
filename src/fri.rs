@@ -60,20 +60,14 @@ pub fn prove<F: PrimeField + FftField>(
         return Err(ProofError::InvalidTerminalSize);
     }
 
-    let mut evals = vec![F::zero(); degree];
+    /// committing to f(x)
+    let mut evals = vec![F::zero(); domain_size];
     evals[..coeffs.len()].copy_from_slice(&coeffs);
     domain.fft_in_place(&mut evals);
+    let leaf_vecs = evals_to_bytes(&evals);
+    let leaf_slices: Vec<&[u8]> = leaf_vecs.iter().map(|v| v.as_slice()).collect();
 
-    // convert Vec<F> to slice of bytes
-    let mut leaves_bytes: Vec<Vec<u8>> = Vec::with_capacity(evals.len());
-    for x in &evals {
-        let mut buf = Vec::new();
-        x.serialize_compressed(&mut buf).expect("field serialize");
-        leaves_bytes.push(buf);
-    }
-    let row_refs: Vec<&[u8]> = leaves_bytes.iter().map(|v| v.as_slice()).collect();
-
-    let tree = MerkleTree::<Blake3Hasher>::from_rows(&row_refs)?;
+    let tree = MerkleTree::<Blake3Hasher>::from_rows(&leaf_slices)?;
     let root = tree.root();
 
     // getting random challenge
@@ -81,9 +75,31 @@ pub fn prove<F: PrimeField + FftField>(
     tx.absorb_digest(root);
     let alpha = tx.challenge_field("alpha");
 
+    /// calculating f*(x) codeword and committing to it
     let f_star_evals = fold_poly(&evals, domain, alpha);
+    let f_star_leafs = evals_to_bytes(&f_star_evals);
+    let f_star_leafs = f_star_leafs.iter().map(|v| v.as_slice()).collect::<Vec<_>>();
+
+    let f_star_tree = MerkleTree::<Blake3Hasher>::from_rows(&f_star_leafs)?;
+    let f_star_root = f_star_tree.root();
+
+    tx.absorb_digest(f_star_root);
+    // sampling i in [0..n/2)
+    let i = tx.challenge_index("i_query", f_star_evals.len() as u64);
+
 
     todo!()
+}
+
+// convert Vec<F> to slice of bytes
+fn evals_to_bytes<F: PrimeField + FftField>(evals: &[F]) -> Vec<Vec<u8>> {
+    let mut leaves_bytes: Vec<Vec<u8>> = Vec::with_capacity(evals.len());
+    for x in evals {
+        let mut buf = Vec::new();
+        x.serialize_compressed(&mut buf).expect("field serialize");
+        leaves_bytes.push(buf);
+    }
+    leaves_bytes
 }
 
 fn fold_poly<F: PrimeField + FftField>(
