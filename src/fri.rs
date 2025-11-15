@@ -109,6 +109,7 @@ pub fn prove<F: PrimeField + FftField>(
                 size: ni,
             } = domains[i];
             let half = ni / 2;
+            j %= half;
 
             let left = evaluations_layers[i][j];
             let right = evaluations_layers[i][j + half];
@@ -126,8 +127,6 @@ pub fn prove<F: PrimeField + FftField>(
                     path: right_path,
                 },
             });
-
-            j %= half;
         }
         queries.push(FriQuery { rounds })
     }
