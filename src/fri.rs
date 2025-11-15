@@ -9,8 +9,6 @@ pub struct FriProof<F: Field> {
     pub roots: Vec<Digest>,
     // Queries for each step of FRI, one per index queried
     pub queries: Vec<FriQuery<F>>,
-    // Protocol's result polynomial
-    pub final_coeffs: Vec<F>,
 }
 
 /// FriQuery contains folds for each step of FRI
@@ -51,17 +49,12 @@ struct RoundDomain<F> {
 pub fn prove<F: PrimeField + FftField>(
     coeffs: &[F],
     domain0: GeneralEvaluationDomain<F>,
-    min_poly_size: usize,
     fs_seed: &[u8],
 ) -> Result<FriProof<F>, ProofError> {
     let n0 = domain0.size();
     if coeffs.is_empty() || coeffs.len() > n0 {
         return Err(ProofError::DegreeExceedsDomain);
     }
-    if min_poly_size == 0 || min_poly_size > n0 || !min_poly_size.is_power_of_two() {
-        return Err(ProofError::InvalidTerminalSize);
-    }
-
     let mut evals_i = vec![F::zero(); n0];
     evals_i[..coeffs.len()].copy_from_slice(coeffs);
     domain0.fft_in_place(&mut evals_i);
@@ -70,7 +63,7 @@ pub fn prove<F: PrimeField + FftField>(
     // TODO: make it scalable
     let num_queries = 1;
     let mut tx = Transcript::new(b"transcript", fs_seed);
-    tx.absorb_params(n0, min_poly_size, num_queries);
+    tx.absorb_params(n0, 1, num_queries);
 
     let mut evaluations_layers = vec![];
     let mut roots = vec![];
@@ -80,7 +73,7 @@ pub fn prove<F: PrimeField + FftField>(
     let mut g = g0;
 
     // calculate fold
-    while n > min_poly_size {
+    while n > 1 {
         let leaves_bytes = evals_to_bytes(&evals_i);
         let leaf_refs: Vec<_> = leaves_bytes.iter().map(|v| v.as_slice()).collect();
         let tree = MerkleTree::<Blake3Hasher>::from_rows(&leaf_refs)?;
@@ -102,10 +95,11 @@ pub fn prove<F: PrimeField + FftField>(
         g = g.square();
         n /= 2;
     }
+    tx.absorb_field("fri/final_const", &evals_i[0]);
 
     // query phase
     let mut queries = Vec::with_capacity(num_queries);
-    for q in 0..num_queries {
+    for _ in 0..num_queries {
         let mut j = tx.challenge_index("fri/query", n0 as u64) as usize;
         let mut rounds = Vec::with_capacity(roots.len());
 
@@ -138,11 +132,7 @@ pub fn prove<F: PrimeField + FftField>(
         queries.push(FriQuery { rounds })
     }
 
-    Ok(FriProof {
-        roots,
-        queries,
-        final_coeffs: todo!(),
-    })
+    Ok(FriProof { roots, queries })
 }
 
 // convert Vec<F> to slice of bytes
