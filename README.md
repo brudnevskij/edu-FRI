@@ -1,7 +1,7 @@
 # edu-FRI
 
 A tiny, readable implementation of **FRI** (Fast Reed–Solomon IOP of Proximity) in Rust. 
-**⚠️ Educational purposes only** - This is not a production library; it's a learning project with clear code paths you can step through.
+**Educational purposes only** - This is not a production library; it's a learning project with clear code paths you can step through.
 
 What it does right now:
 
