@@ -6,7 +6,7 @@ use ark_poly::{EvaluationDomain, GeneralEvaluationDomain};
 use ark_std::iterable::Iterable;
 use thiserror::Error;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct FriProof<F: Field> {
     // Merkle roots per FRI step
     pub roots: Vec<Digest>,
@@ -16,21 +16,21 @@ pub struct FriProof<F: Field> {
 }
 
 /// FriQuery contains folds for each step of FRI
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct FriQuery<F: Field> {
     pub rounds: Vec<FriRound<F>>,
 }
 
 /// FriRound contains left and right addend of FRI folding scheme and their auth
 /// f(x), f(-x)
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct FriRound<F: Field> {
     pub left: Opened<F>,
     pub right: Opened<F>,
 }
 
 /// Opened contains value and merkle tree auth path
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Opened<F: Field> {
     pub value: F,
     pub path: AuthPath,

@@ -3,7 +3,7 @@ use thiserror::Error;
 
 pub type Digest = [u8; 32];
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct AuthPath {
     pub nodes: Vec<Digest>,
     pub index: usize,
