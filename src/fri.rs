@@ -1,29 +1,36 @@
-use crate::merkle::{AuthPath, Blake3Hasher, Digest, MerkleError, MerkleTree};
+use crate::fri::VerificationError::{MerkleAuthError, VerificationFailed};
+use crate::merkle::{AuthPath, Blake3Hasher, Digest, MerkleError, MerkleTree, verify_row};
 use crate::transcript::Transcript;
 use ark_ff::{FftField, Field, PrimeField};
 use ark_poly::{EvaluationDomain, GeneralEvaluationDomain};
+use ark_std::iterable::Iterable;
 use thiserror::Error;
 
+#[derive(Debug)]
 pub struct FriProof<F: Field> {
     // Merkle roots per FRI step
     pub roots: Vec<Digest>,
     // Queries for each step of FRI, one per index queried
     pub queries: Vec<FriQuery<F>>,
+    pub final_eval: F,
 }
 
 /// FriQuery contains folds for each step of FRI
+#[derive(Debug)]
 pub struct FriQuery<F: Field> {
     pub rounds: Vec<FriRound<F>>,
 }
 
 /// FriRound contains left and right addend of FRI folding scheme and their auth
 /// f(x), f(-x)
+#[derive(Debug)]
 pub struct FriRound<F: Field> {
     pub left: Opened<F>,
     pub right: Opened<F>,
 }
 
 /// Opened contains value and merkle tree auth path
+#[derive(Debug)]
 pub struct Opened<F: Field> {
     pub value: F,
     pub path: AuthPath,
@@ -95,12 +102,13 @@ pub fn prove<F: PrimeField + FftField>(
         g = g.square();
         n /= 2;
     }
-    tx.absorb_field("fri/final_const", &evals_i[0]);
+    let final_eval = evals_i[0];
+    tx.absorb_field("fri/final_const", &final_eval);
 
     // query phase
     let mut queries = Vec::with_capacity(num_queries);
     for _ in 0..num_queries {
-        let mut j = tx.challenge_index("fri/query", n0 as u64) as usize;
+        let mut idx = tx.challenge_index("fri/query", (n0 / 2) as u64) as usize;
         let mut rounds = Vec::with_capacity(roots.len());
 
         for (i, tree) in trees.iter().enumerate() {
@@ -109,13 +117,17 @@ pub fn prove<F: PrimeField + FftField>(
                 size: ni,
             } = domains[i];
             let half = ni / 2;
-            j %= half;
 
-            let left = evaluations_layers[i][j];
-            let right = evaluations_layers[i][j + half];
+            let mut neg_idx = idx + half;
+            if neg_idx >= ni {
+                neg_idx = neg_idx % ni;
+            }
 
-            let left_path = tree.open(j)?;
-            let right_path = tree.open(j + half)?;
+            let left = evaluations_layers[i][idx];
+            let right = evaluations_layers[i][neg_idx];
+
+            let left_path = tree.open(idx)?;
+            let right_path = tree.open(neg_idx)?;
 
             rounds.push(FriRound {
                 left: Opened {
@@ -127,11 +139,17 @@ pub fn prove<F: PrimeField + FftField>(
                     path: right_path,
                 },
             });
+
+            idx %= half;
         }
         queries.push(FriQuery { rounds })
     }
 
-    Ok(FriProof { roots, queries })
+    Ok(FriProof {
+        roots,
+        queries,
+        final_eval,
+    })
 }
 
 // convert Vec<F> to slice of bytes
@@ -169,20 +187,112 @@ fn fold_once<F: PrimeField + FftField>(evals: &[F], g: F, beta: F) -> Vec<F> {
     out
 }
 
+#[derive(Error, Debug)]
+pub enum VerificationError {
+    #[error("bad init params")]
+    BadProof,
+    #[error("roots len != rounds")]
+    RootsNEtoQueryRounds,
+    #[error("domain folded to constant sooner than expected")]
+    QueriesBiggerThenFolds,
+    #[error("merkle auth failed")]
+    MerkleAuthError(usize, usize),
+    #[error("verification failed")]
+    VerificationFailed,
+}
+
 pub fn verify<F: PrimeField + FftField>(
     proof: &FriProof<F>,
     domain: GeneralEvaluationDomain<F>,
-    min_poly_size: usize,
     fs_seed: &[u8],
-) -> bool {
-    todo!()
+) -> Result<(), VerificationError> {
+    let n0 = domain.size();
+    if n0 == 0 || proof.roots.is_empty() || proof.queries.len() == 0 {
+        return Err(VerificationError::BadProof);
+    }
+
+    let num_queries = proof.queries.len();
+    let mut tx = Transcript::new(b"transcript", fs_seed);
+    tx.absorb_params(n0, 1, num_queries);
+
+    let mut betas = Vec::with_capacity(proof.roots.len());
+    for root in &proof.roots {
+        tx.absorb_digest(root);
+        let beta: F = tx.challenge_field("fri/beta_i");
+        betas.push(beta);
+    }
+    tx.absorb_field("fri/final_const", &proof.final_eval);
+
+    for q in &proof.queries {
+        let mut idx = tx.challenge_index("fri/query", (n0 / 2) as u64) as usize;
+        let mut n = n0;
+        let mut g = domain.group_gen();
+        let inv2 = F::from(2u64).inverse().expect("inverse");
+
+        if q.rounds.len() != proof.roots.len() {
+            return Err(VerificationError::RootsNEtoQueryRounds);
+        }
+
+        for (i, round) in q.rounds.iter().enumerate() {
+            let half = n / 2;
+            if half == 0 {
+                return Err(VerificationError::QueriesBiggerThenFolds);
+            }
+            // verify merkle openings
+            let mut left_bytes = vec![];
+            round
+                .left
+                .value
+                .serialize_compressed(&mut left_bytes)
+                .unwrap();
+            if !verify_row::<Blake3Hasher>(&proof.roots[i], &left_bytes, &round.left.path) {
+                return Err(MerkleAuthError(i, idx));
+            }
+
+            let mut right_bytes = vec![];
+            round
+                .right
+                .value
+                .serialize_compressed(&mut right_bytes)
+                .unwrap();
+            if !verify_row::<Blake3Hasher>(&proof.roots[i], &right_bytes, &round.right.path) {
+                return Err(MerkleAuthError(i, idx + half));
+            }
+
+            // fold
+            let L = round.left.value;
+            let R = round.right.value;
+            let x = g.pow([idx as u64]);
+            let even = (L + R) * inv2;
+            let odd = (L - R) * inv2 * x.inverse().unwrap();
+            let y = even + betas[i] * odd;
+
+            if i + 1 == q.rounds.len() {
+                // terminal check against the constant
+                if y != proof.final_eval {
+                    return Err(VerificationFailed);
+                }
+            } else {
+                // bridge check: the folded value must equal the next layer's committed value
+                if y != q.rounds[i + 1].left.value {
+                    return Err(VerificationFailed);
+                }
+            }
+
+            // advance
+            idx %= half;
+            n = half;
+            g = g.square();
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
-    use super::fold_once;
+    use super::{ProofError, VerificationError, fold_once, prove, verify};
     use ark_bn254::Fr;
-    use ark_ff::{Field, UniformRand, Zero};
+    use ark_ff::{Field, One, PrimeField, UniformRand, Zero};
     use ark_poly::univariate::DensePolynomial;
     use ark_poly::{DenseUVPolynomial, EvaluationDomain, GeneralEvaluationDomain};
     use ark_std::rand::{SeedableRng, rngs::StdRng};
@@ -218,6 +328,115 @@ mod tests {
             .iter()
             .rev()
             .fold(Fr::zero(), |acc, &c| acc * x + c)
+    }
+
+    // pick a power-of-two N ≥ deg+1
+    fn pick_domain<F: PrimeField>(n: usize) -> GeneralEvaluationDomain<F> {
+        GeneralEvaluationDomain::<F>::new(n).expect("radix-2 domain")
+    }
+    #[test]
+    fn honest_prover_verifier_ok() {
+        // N = 2^15
+        let n = 32768usize;
+        let domain = pick_domain::<Fr>(n);
+        let coeffs = random_poly(32768, 1337);
+
+        let seed = b"fri-seed-1";
+        let proof = prove::<Fr>(&coeffs, domain, seed).expect("prove should succeed");
+
+        verify::<Fr>(&proof, pick_domain::<Fr>(n), seed).expect("verify should succeed");
+
+        let coeffs = random_poly(16384, 2048);
+        let proof = prove::<Fr>(&coeffs, domain, seed).expect("prove should succeed");
+    }
+
+    #[test]
+    fn tamper_leaf_value_fails() {
+        let n = 32usize;
+        let domain = pick_domain::<Fr>(n);
+        let coeffs = random_poly(10, 2024);
+
+        let seed = b"fri-seed-2";
+        let mut proof = prove::<Fr>(&coeffs, domain, seed).expect("prove ok");
+
+        // mutate the first query's first round left value
+        if let Some(q) = proof.queries.get_mut(0) {
+            if let Some(r0) = q.rounds.get_mut(0) {
+                r0.left.value += Fr::one();
+            }
+        }
+
+        let err = verify::<Fr>(&proof, pick_domain::<Fr>(n), seed).unwrap_err();
+        matches!(err, VerificationError::MerkleAuthError(_, _));
+    }
+
+    #[test]
+    fn tamper_merkle_path_fails() {
+        let n = 32usize;
+        let domain = pick_domain::<Fr>(n);
+        let coeffs = random_poly(9, 77);
+
+        let seed = b"fri-seed-3";
+        let mut proof = prove::<Fr>(&coeffs, domain, seed).expect("prove ok");
+
+        // flip one byte in the first path’s first node
+        if let Some(q) = proof.queries.get_mut(0) {
+            if let Some(r0) = q.rounds.get_mut(0) {
+                if let Some(first_node) = r0.left.path.nodes.get_mut(0) {
+                    first_node[0] ^= 0x01;
+                }
+            }
+        }
+
+        let err = verify::<Fr>(&proof, pick_domain::<Fr>(n), seed).unwrap_err();
+        matches!(err, VerificationError::MerkleAuthError(_, _));
+    }
+
+    #[test]
+    fn tamper_root_fails() {
+        let n = 32usize;
+        let domain = pick_domain::<Fr>(n);
+        let coeffs = random_poly(7, 55);
+
+        let seed = b"fri-seed-4";
+        let mut proof = prove::<Fr>(&coeffs, domain, seed).expect("prove ok");
+
+        // Corrupt the first root
+        if let Some(root0) = proof.roots.get_mut(0) {
+            root0[0] ^= 0x42;
+        }
+
+        let err = verify::<Fr>(&proof, pick_domain::<Fr>(n), seed).unwrap_err();
+        matches!(err, VerificationError::MerkleAuthError(_, _))
+            || matches!(err, VerificationError::VerificationFailed);
+    }
+
+    #[test]
+    fn degree_exceeds_domain_errors() {
+        let n = 16usize;
+        let domain = pick_domain::<Fr>(n);
+
+        let coeffs = random_poly(n + 1, 9999);
+        let seed = b"fri-seed-5";
+        println!("{}", coeffs.len());
+        let err = prove::<Fr>(&coeffs, domain, seed).unwrap_err();
+        assert!(matches!(err, ProofError::DegreeExceedsDomain));
+    }
+
+    #[test]
+    fn determinism_same_seed_same_proof_shape() {
+        let n = 64usize;
+        let domain = pick_domain::<Fr>(n);
+        let coeffs = random_poly(11, 4242);
+        let seed = b"fri-seed-6";
+
+        let p1 = prove::<Fr>(&coeffs, domain, seed).expect("prove ok");
+        let p2 = prove::<Fr>(&coeffs, domain, seed).expect("prove ok");
+
+        assert_eq!(p1.roots.len(), p2.roots.len());
+        assert_eq!(p1.queries.len(), p2.queries.len());
+
+        assert_eq!(p1.final_eval, p2.final_eval);
     }
 
     #[test]
